@@ -4,12 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: Only verify login and friends without sending
+        description: Only verify login and configured friends without sending
         type: boolean
-        default: false
-  # 使用 GitHub Actions 的日程时把下面三行注释删掉；用外部 cron 不用管
+        default: true
+      test_target:
+        description: Required exact configured friend name for a manual real-send verification
+        type: string
+        required: false
+  # Deliberately disabled until the cloud single-target send and duplicate protection
+  # have both been verified and the user explicitly authorizes automatic sends.
   # schedule:
-  #   - cron: "0 0 * * *"
+  #   - cron: "0 22 * * *"
   #     timezone: "Asia/Shanghai"
 
 concurrency:
@@ -41,6 +46,27 @@ jobs:
       - name: Write protected configuration
         shell: bash
         run: printf '%s' "$DOUYIN_CONFIG" > config.json
+      - name: Validate protected cloud configuration
+        shell: bash
+        run: |
+          python - <<'PY'
+          from app.config import load_settings, load_task
+
+          task = load_task(load_settings())
+          if len(task.targets) != 24:
+              raise SystemExit(f"DOUYIN_CONFIG must contain exactly 24 targets; got {len(task.targets)}")
+          if task.prevent_duplicates is not True:
+              raise SystemExit("DOUYIN_CONFIG must set prevent_duplicates to true for cloud runs")
+          if not task.stickers:
+              raise SystemExit("DOUYIN_CONFIG must include the native sticker mapping")
+          if not all(
+              message.type == "sticker" and message.value in task.stickers
+              for target in task.targets
+              for message in target.messages
+          ):
+              raise SystemExit("Every cloud target must use a configured native sticker message")
+          print(f"Cloud configuration validated: target_count={len(task.targets)}, native_sticker_only=true")
+          PY
       - name: Write multi-account configuration
         shell: bash
         env:
@@ -64,16 +90,12 @@ jobs:
           from pathlib import Path
 
           if not any(os.environ.get(f"COOKIE_{i}") for i in range(1, 6)):
-              # 没有配置任何多账号 Secret（DOUYIN_COOKIE_ACCOUNTn）：
-              # 保持旧单账号模式，不生成 accounts.json。
-              print("未配置多账号 Secret，继续使用旧单账号模式")
+              print("No multi-account Secrets configured; using the single-account Secrets")
               raise SystemExit(0)
 
           accounts = []
           for index in range(1, 6):
               if index == 1 and not os.environ.get("COOKIE_1") and not os.environ.get("CONFIG_1"):
-                  # 没有配置 DOUYIN_COOKIE_ACCOUNT1 时，旧版 DOUYIN_COOKIE /
-                  # DOUYIN_CONFIG 自动作为账号1，方便老用户直接追加新账号。
                   cookie = os.environ.get("LEGACY_COOKIE")
                   config = os.environ.get("LEGACY_CONFIG")
               else:
@@ -83,21 +105,18 @@ jobs:
                   continue
               if not cookie or not config:
                   raise SystemExit(
-                      f"账号 account{index} 的 DOUYIN_COOKIE_ACCOUNT{index} 与 "
-                      f"DOUYIN_CONFIG_ACCOUNT{index} 必须同时配置"
+                      f"account{index} requires both DOUYIN_COOKIE_ACCOUNT{index} and "
+                      f"DOUYIN_CONFIG_ACCOUNT{index}"
                   )
-              # 提前校验，出错时直接指出是哪个 Secret，避免任务执行时才报错
               try:
                   json.loads(cookie)
               except json.JSONDecodeError as exc:
-                  raise SystemExit(f"DOUYIN_COOKIE_ACCOUNT{index} 不是有效 JSON: {exc}") from exc
+                  raise SystemExit(f"DOUYIN_COOKIE_ACCOUNT{index} is not valid JSON: {exc}") from exc
               try:
                   json.loads(config)
               except json.JSONDecodeError as exc:
-                  raise SystemExit(f"DOUYIN_CONFIG_ACCOUNT{index} 不是有效 JSON: {exc}") from exc
+                  raise SystemExit(f"DOUYIN_CONFIG_ACCOUNT{index} is not valid JSON: {exc}") from exc
               env_file = f".env.account{index}"
-              # Cookie 用 JSON 字符串转义后写入，dotenv 可精确还原，
-              # 兼容多行 Cookie JSON 与 # 等特殊字符
               Path(env_file).write_text(
                   f"DOUYIN_COOKIE={json.dumps(cookie)}\nTASK_CONFIG=config/tasks/account{index}.json\n",
                   encoding="utf-8",
@@ -109,6 +128,49 @@ jobs:
               encoding="utf-8",
           )
           PY
+      - name: Limit manual real send to one configured test friend
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false }}
+        shell: bash
+        env:
+          TEST_TARGET: ${{ inputs.test_target }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          target = os.environ.get("TEST_TARGET", "").strip()
+          if not target:
+              raise SystemExit("Manual real send requires the test_target input")
+          path = Path("config.json")
+          raw = json.loads(path.read_text(encoding="utf-8"))
+          if "targets" in raw:
+              selected = [item for item in raw["targets"] if item.get("name") == target]
+              raw["targets"] = selected
+          elif "friends" in raw:
+              selected = [name for name in raw["friends"] if name == target]
+              raw["friends"] = selected
+          else:
+              raise SystemExit("DOUYIN_CONFIG has neither targets nor friends")
+          if len(selected) != 1:
+              raise SystemExit("test_target must exactly match one configured friend")
+          path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+          print("Manual real-send scope validated: target_count=1")
+          PY
+      - name: Restore cloud send history
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false) }}
+        uses: actions/cache/restore@v4
+        with:
+          path: artifacts/history.json
+          key: douyin-send-history-v1-${{ github.run_id }}
+          restore-keys: |
+            douyin-send-history-v1-
+      - name: Prepare cloud send history
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false) }}
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          test -f artifacts/history.json || printf '{}' > artifacts/history.json
       - name: Run
         shell: bash
         run: |
@@ -117,6 +179,12 @@ jobs:
           else
             python run.py
           fi
+      - name: Save cloud send history
+        if: ${{ always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)) }}
+        uses: actions/cache/save@v4
+        with:
+          path: artifacts/history.json
+          key: douyin-send-history-v1-${{ github.run_id }}
       - name: Upload diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
