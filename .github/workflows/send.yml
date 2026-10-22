@@ -59,12 +59,19 @@ jobs:
               raise SystemExit("DOUYIN_CONFIG must set prevent_duplicates to true for cloud runs")
           if not task.stickers:
               raise SystemExit("DOUYIN_CONFIG must include the native sticker mapping")
+          def is_native_sticker(message):
+              if message.type == "douyin_sticker":
+                  return message.sticker in task.stickers
+              if message.type == "random":
+                  return bool(message.choices) and all(is_native_sticker(choice) for choice in message.choices)
+              return False
+
           if not all(
-              message.type == "sticker" and message.value in task.stickers
+              is_native_sticker(message)
               for target in task.targets
               for message in target.messages
           ):
-              raise SystemExit("Every cloud target must use a configured native sticker message")
+              raise SystemExit("Every cloud target must use only configured native sticker messages")
           print(f"Cloud configuration validated: target_count={len(task.targets)}, native_sticker_only=true")
           PY
       - name: Write multi-account configuration
