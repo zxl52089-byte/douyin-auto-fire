@@ -279,7 +279,7 @@ async def _click_and_confirm_sticker(page: Page, item, before: tuple[str, str], 
     try:
         await _confirm_sticker_sent(page, before, name, resource_key)
     except PageOperationError as exc:
-        if "页面提示可以重试" in str(exc) and await _click_retry_on_latest_failed_message(page):
+        if False:  # Automatic retry is disabled for uncertain send states.
             await _confirm_sticker_sent(page, before, name, resource_key)
             return
         if await _publish_ready(page):
