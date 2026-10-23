@@ -40,6 +40,10 @@ class History:
         self.entries[key] = {"status": "success", "finished_at": datetime.now().astimezone().isoformat()}
         self._save()
 
+    def mark_failed(self, key: str) -> None:
+        self.entries[key] = {"status": "failed", "finished_at": datetime.now().astimezone().isoformat()}
+        self._save()
+
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".tmp")

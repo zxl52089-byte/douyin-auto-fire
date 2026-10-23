@@ -279,9 +279,11 @@ async def _click_and_confirm_sticker(page: Page, item, before: tuple[str, str], 
     try:
         await _confirm_sticker_sent(page, before, name, resource_key)
     except PageOperationError as exc:
-        if False:  # Automatic retry is disabled for uncertain send states.
-            await _confirm_sticker_sent(page, before, name, resource_key)
-            return
+        # A platform failure marker or an unconfirmed terminal state is not
+        # recoverable automatically: pressing Send again could duplicate the
+        # native sticker. Propagate the original failure for diagnosis.
+        if "页面提示可以重试" in str(exc) or "发送状态未能确认" in str(exc):
+            raise
         if await _publish_ready(page):
             await _trigger_send(page)
             await _confirm_sticker_sent(page, before, name, resource_key)

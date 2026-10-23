@@ -15,6 +15,18 @@ def test_history_persists_success(tmp_path: Path) -> None:
     assert History(path).contains(key)
 
 
+def test_history_persists_explicit_failure_without_calling_it_success(tmp_path: Path) -> None:
+    path = tmp_path / "history.json"
+    history = History(path)
+    key = history.key("task", "2026-10-23", "好友A", "0-native-sticker")
+
+    history.mark_failed(key)
+
+    restored = History(path)
+    assert restored.contains(key)
+    assert restored.entries[key]["status"] == "failed"
+
+
 def test_history_key_hides_target_and_message_identifiers(tmp_path: Path) -> None:
     history = History(tmp_path / "history.json")
 

@@ -119,7 +119,15 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
                                 # 发送单条消息并计时
                                 msg_start = time.time()
                                 await verify_login(page, timeout_ms=3_000)
-                                await send_message(page, chat, message, task.stickers)
+                                try:
+                                    await send_message(page, chat, message, task.stickers)
+                                except PageOperationError as exc:
+                                    # The page explicitly reported failure, so preserve that
+                                    # distinction. Other exceptions retain the earlier
+                                    # "unknown" reservation and are never retried automatically.
+                                    if task.prevent_duplicates and "页面提示可以重试" in str(exc):
+                                        history.mark_failed(key)
+                                    raise
                                 msg_duration = time.time() - msg_start
                                 metrics.record_message_time(msg_duration)
 

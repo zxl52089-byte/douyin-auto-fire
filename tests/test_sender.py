@@ -309,7 +309,7 @@ async def test_sticker_click_retries_via_publish_when_staged(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_sticker_click_retries_via_retry_marker_when_failed(monkeypatch) -> None:
+async def test_sticker_click_retry_marker_raises_without_retry(monkeypatch) -> None:
     item = MagicMock()
     item.get_attribute = AsyncMock(return_value=None)
     item.click = AsyncMock()
@@ -351,11 +351,12 @@ async def test_sticker_click_retries_via_retry_marker_when_failed(monkeypatch) -
     monkeypatch.setattr("app.sender._trigger_send", fake_trigger)
     monkeypatch.setattr("app.sender._publish_ready", fake_ready)
 
-    await _click_and_confirm_sticker(page, item, ("anchor", "old"), "比心")
+    with pytest.raises(PageOperationError, match="发送失败"):
+        await _click_and_confirm_sticker(page, item, ("anchor", "old"), "比心")
 
-    assert calls["confirm"] == 2
+    assert calls["confirm"] == 1
     assert calls["publish"] == 0
-    marker.click.assert_awaited_once_with(force=True)
+    marker.click.assert_not_awaited()
 
 
 @pytest.mark.asyncio

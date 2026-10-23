@@ -8,14 +8,17 @@ on:
         type: boolean
         default: true
       test_target:
-        description: Required exact configured friend name for a manual real-send verification
+        description: Optional exact configured friend name; required for manual real-send verification
         type: string
         required: false
+      history_check:
+        description: Verify persistent cloud duplicate history without opening Douyin
+        type: boolean
+        default: false
   # Deliberately disabled until the cloud single-target send and duplicate protection
   # have both been verified and the user explicitly authorizes automatic sends.
   # schedule:
-  #   - cron: "0 22 * * *"
-  #     timezone: "Asia/Shanghai"
+  #   - cron: "0 14 * * *" # 22:00 Asia/Shanghai (UTC+8)
 
 concurrency:
   group: douyin-daily-sender
@@ -26,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: read
+      contents: write
     env:
       DOUYIN_COOKIE: ${{ secrets.DOUYIN_COOKIE }}
       DOUYIN_CONFIG: ${{ secrets.DOUYIN_CONFIG }}
@@ -36,17 +39,22 @@ jobs:
       WEBHOOK_HEADERS: ${{ secrets.WEBHOOK_HEADERS }}
       WEBHOOK_TEMPLATE: ${{ secrets.WEBHOOK_TEMPLATE }}
       HEADLESS: "true"
+      TRACE: "false"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r requirements.txt
-      - run: python -m playwright install --with-deps chromium
+      - if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.history_check == true) }}
+        run: pip install -r requirements.txt
+      - if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.history_check == true) }}
+        run: python -m playwright install --with-deps chromium
       - name: Write protected configuration
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.history_check == true) }}
         shell: bash
         run: printf '%s' "$DOUYIN_CONFIG" > config.json
       - name: Validate protected cloud configuration
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.history_check == true) }}
         shell: bash
         run: |
           python - <<'PY'
@@ -75,6 +83,7 @@ jobs:
           print(f"Cloud configuration validated: target_count={len(task.targets)}, native_sticker_only=true")
           PY
       - name: Write multi-account configuration
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.history_check == true) }}
         shell: bash
         env:
           COOKIE_1: ${{ secrets.DOUYIN_COOKIE_ACCOUNT1 }}
@@ -135,8 +144,15 @@ jobs:
               encoding="utf-8",
           )
           PY
-      - name: Limit manual real send to one configured test friend
+      - name: Require an exact manual real-send target
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false }}
+        shell: bash
+        env:
+          TEST_TARGET: ${{ inputs.test_target }}
+        run: |
+          test -n "$TEST_TARGET" || { echo "Manual real send requires test_target"; exit 1; }
+      - name: Limit manual run to one configured test friend
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_target != '' }}
         shell: bash
         env:
           TEST_TARGET: ${{ inputs.test_target }}
@@ -162,23 +178,51 @@ jobs:
           if len(selected) != 1:
               raise SystemExit("test_target must exactly match one configured friend")
           path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
-          print("Manual real-send scope validated: target_count=1")
+          print("Manual run scope validated: target_count=1")
           PY
       - name: Restore cloud send history
-        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false) }}
-        uses: actions/cache/restore@v4
-        with:
-          path: artifacts/history.json
-          key: douyin-send-history-v1-${{ github.run_id }}
-          restore-keys: |
-            douyin-send-history-v1-
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.dry_run == false || inputs.history_check == true)) }}
+        shell: bash
+        env:
+          HISTORY_BRANCH: douyin-send-history
+        run: |
+          mkdir -p artifacts
+          if git ls-remote --exit-code origin "refs/heads/${HISTORY_BRANCH}" >/dev/null 2>&1; then
+            git fetch --no-tags origin "${HISTORY_BRANCH}"
+            git show FETCH_HEAD:history.json > artifacts/history.json
+            echo "Cloud history restored"
+          else
+            printf '{}' > artifacts/history.json
+            echo "Cloud history initialized"
+          fi
       - name: Prepare cloud send history
-        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false) }}
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.dry_run == false || inputs.history_check == true)) }}
         shell: bash
         run: |
           mkdir -p artifacts
           test -f artifacts/history.json || printf '{}' > artifacts/history.json
+      - name: Verify persistent-history contract
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.history_check == true }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from app.history import History
+
+          history = History(Path("artifacts/history.json"))
+          today_key = history.key("cloud-history-check", "2099-12-31", "self-test", "native-sticker")
+          tomorrow_key = history.key("cloud-history-check", "2100-01-01", "self-test", "native-sticker")
+          if history.contains(today_key):
+              print("Cloud history restored: same-date success remains blocked")
+          else:
+              history.mark_success(today_key)
+              print("Cloud history initialized with a successful self-test")
+          if history.contains(tomorrow_key):
+              raise SystemExit("next-date key was unexpectedly blocked")
+          print("Next-date history key remains available")
+          PY
       - name: Run
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.history_check == true) }}
         shell: bash
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" == "true" ]]; then
@@ -186,16 +230,32 @@ jobs:
           else
             python run.py
           fi
-      - name: Save cloud send history
-        if: ${{ always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)) }}
-        uses: actions/cache/save@v4
-        with:
-          path: artifacts/history.json
-          key: douyin-send-history-v1-${{ github.run_id }}
-      - name: Upload diagnostics
+      - name: Persist cloud send history
+        if: ${{ always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.dry_run == false || inputs.history_check == true))) }}
+        shell: bash
+        env:
+          HISTORY_BRANCH: douyin-send-history
+        run: |
+          test -f artifacts/history.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          blob=$(git hash-object -w artifacts/history.json)
+          tree=$(printf '100644 blob %s\thistory.json\n' "$blob" | git mktree)
+          if git ls-remote --exit-code origin "refs/heads/${HISTORY_BRANCH}" >/dev/null 2>&1; then
+            git fetch --no-tags origin "${HISTORY_BRANCH}"
+            parent=$(git rev-parse FETCH_HEAD)
+            commit=$(printf 'Persist cloud duplicate history\n' | git commit-tree "$tree" -p "$parent")
+          else
+            commit=$(printf 'Initialize cloud duplicate history\n' | git commit-tree "$tree")
+          fi
+          git push origin "${commit}:refs/heads/${HISTORY_BRANCH}"
+      - name: Upload sanitized diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: douyin-failure-${{ github.run_id }}
-          path: artifacts/
+          path: |
+            artifacts/result.json
+            artifacts/metrics.json
           retention-days: 3
+          if-no-files-found: ignore
