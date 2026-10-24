@@ -276,19 +276,10 @@ async def _mark_latest_outgoing_message(page: Page) -> tuple[str, str]:
 async def _click_and_confirm_sticker(page: Page, item, before: tuple[str, str], name: str) -> None:
     resource_key = await _sticker_resource_key(item)
     await item.click(force=True)
-    try:
-        await _confirm_sticker_sent(page, before, name, resource_key)
-    except PageOperationError as exc:
-        # A platform failure marker or an unconfirmed terminal state is not
-        # recoverable automatically: pressing Send again could duplicate the
-        # native sticker. Propagate the original failure for diagnosis.
-        if "页面提示可以重试" in str(exc) or "发送状态未能确认" in str(exc):
-            raise
-        if await _publish_ready(page):
-            await _trigger_send(page)
-            await _confirm_sticker_sent(page, before, name, resource_key)
-        else:
-            raise
+    # A click may either send the sticker directly or stage it, but once
+    # confirmation has started any error is an unknown delivery outcome.
+    # Do not press Publish as a fallback: that could create a second send.
+    await _confirm_sticker_sent(page, before, name, resource_key)
 
 
 async def _sticker_resource_key(item) -> str:
