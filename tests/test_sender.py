@@ -274,7 +274,7 @@ async def test_publish_ready_true_when_button_visible() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sticker_click_retries_via_publish_when_staged(monkeypatch) -> None:
+async def test_sticker_click_unknown_confirmation_does_not_press_publish(monkeypatch) -> None:
     item = MagicMock()
     item.get_attribute = AsyncMock(return_value=None)
     item.click = AsyncMock()
@@ -302,10 +302,11 @@ async def test_sticker_click_retries_via_publish_when_staged(monkeypatch) -> Non
     monkeypatch.setattr("app.sender._trigger_send", fake_trigger)
     monkeypatch.setattr("app.sender._publish_ready", fake_ready)
 
-    await _click_and_confirm_sticker(page, item, ("anchor", "old"), "比心")
+    with pytest.raises(PageOperationError, match="未检测到新的已发送消息"):
+        await _click_and_confirm_sticker(page, item, ("anchor", "old"), "比心")
 
-    assert calls["confirm"] == 2
-    assert calls["publish"] == 1
+    assert calls["confirm"] == 1
+    assert calls["publish"] == 0
 
 
 @pytest.mark.asyncio
